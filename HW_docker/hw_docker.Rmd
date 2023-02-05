@@ -1,0 +1,28 @@
+---
+title: "Homework: Docker"
+author: "Vivian Wang"
+output: html_notebook
+---
+
+Create a 5 x 10 matrix of random integers,
+and name the rows and columns
+
+```{r}
+set.seed(123)
+m <- matrix(runif(50, 1, 100), nrow=5, ncol=10) 
+
+# Define column names as cond1, cond2,..., cond5, ctr1,..., ctr5
+colnames(m) <- c("cond1", "cond2", "cond3", "cond4", "cond5",
+                 "ctrl1", "ctrl2", "ctrl3", "ctrl4", "ctrl5")
+
+# Define row names as gene1, gene2,...
+rownames(m) <- c("gene1", "gene2", "gene3", "gene4", "gene5")
+```
+
+Compute fold change in log2 ratios for each gene
+by dividing the mean cond values by the mean ctrl values
+
+```{r}
+fold_change <- log2(rowMeans(m[, 1:5]) / rowMeans(m[, 6:10]))
+fold_change
+```
