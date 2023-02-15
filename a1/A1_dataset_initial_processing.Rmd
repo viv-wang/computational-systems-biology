@@ -1,0 +1,375 @@
+---
+title: "Assignment 1: Dataset initial processing"
+subtitle: "BCB420 - Computational Systems Biology"
+author: "Vivian Wang"
+date: February 14, 2023
+output: 
+  html_document:
+    toc: true
+    toc_depth: 1
+bibliography: A1.bib
+nocite: "@*"
+---
+
+# Packages installation
+
+```{r eval = TRUE, message = FALSE, warning = FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE)){
+  install.packages("BiocManager")}
+
+if (!requireNamespace("GEOmetadb", quietly = TRUE)){
+  BiocManager::install("GEOmetadb")}
+
+if (!requireNamespace("GEOquery", quietly = TRUE)){
+  BiocManager::install("GEOquery")}
+
+if (!requireNamespace("knitr", quietly = TRUE)){
+  install.packages("knitr")}
+
+if (!requireNamespace("edgeR", quietly = TRUE)){
+  BiocManager::install("edgeR")}
+
+if (!requireNamespace("biomaRt", quietly = TRUE)){
+  BiocManager::install("biomaRt")}
+
+if (! requireNamespace("limma", quietly = TRUE)) {
+  BiocManager::install("limma")
+}
+```
+
+# Dataset download and information
+Our dataset of interest is GSE157852. From the previous data selection step,
+we learned that it is a bulk RNA-seq dataset associated with the paper, 
+"Human Pluripotent Stem Cell-Derived Neural Cells and Brain Organoids Reveal 
+SARS-CoV-2 Neurotropism Predominates in Choroid Plexus Epithelium" [@jacob2020human].
+
+First, we will inspect the information associated with the dataset.
+
+#### Contact information:
+```{r eval = TRUE, message = FALSE, warning = FALSE}
+gse <- GEOquery::getGEO("GSE157852", GSEMatrix = FALSE)
+knitr::kable(data.frame(head(GEOquery::Meta(gse))), format = "html", 
+             caption = "GEO description of dataset GSE157852")
+```
+
+
+#### Platform information: 
+```{r eval = TRUE, message = FALSE, warning = FALSE}
+current_gpl <- names(GEOquery::GPLList(gse))[1]
+current_gpl_info <- GEOquery::Meta(GEOquery::getGEO(current_gpl))
+```
+Platform title: `r current_gpl_info$title` <br>
+Submission date: `r current_gpl_info$submission_date` <br>
+Last update date: `r current_gpl_info$last_update_date` <br>
+Organism: `r current_gpl_info$organism` <br>
+Number of GEO datasets that use this technology: `r length(current_gpl_info$series_id)` <br>
+Number of GEO samples that use this technology: `r length(current_gpl_info$sample_id)`
+
+
+## Download and inspect supplementary file
+
+```{r eval = TRUE, message = FALSE, warning = FALSE}
+sfiles = GEOquery::getGEOSuppFiles("GSE157852")
+(fnames = rownames(sfiles))
+# There is only one supplementary file, which is our dataset of interest
+rawCounts = read.delim(fnames[1], sep = " ", header = TRUE, check.names = FALSE)
+
+# Inspect the first 5 rows
+knitr::kable(rawCounts[1:5, ], format = "html")
+
+# For clarity, keep gene names in both rownames and Column 1
+rawCounts <- cbind(gene_name = rownames(rawCounts), rawCounts, row.names = NULL)
+rownames(rawCounts) <- rawCounts$gene_name
+```
+There are now 10 columns: <br>
+Column 1 contains gene names, which appear to be HUGO gene symbols. 
+Columns 2 to 10 contain raw counts for samples 1 to 9, respectively.
+From the paper we know that "CPO" is an abbreviation for "choroid plexus organoid"
+which is the tissue of study in this transcriptome analysis [@jacob2020human].
+
+## Get number of genes and sample names:
+```{r eval = TRUE, message = FALSE, warning = FALSE}
+dim(rawCounts)
+colnames(rawCounts)
+```
+The initial coverage is 29755 genes.
+There are 9 samples in total: 3 different types, each with 3 replicants.
+
+## Associate samples with groups
+Using the column names, we can identify each sample and assign them to groups.
+There are 2 treatments: mock (control) and SARS-CoV-2.
+There are 2 time points: 24 and 72 hours post-infection (hpi).
+However, given that the mock treatment group only has one time point, comparing
+the data between the 3 predefined groups is still more meaningful.
+So, we will associate each sample with one of the 3 groups:
+Mock_72hpi, SARS-CoV-2_24hpi, and SARS-CoV-2_72hpi.
+
+```{r eval = TRUE, message = FALSE, warning = FALSE}
+# Extract the part of column names between "CPO_" and "_S"
+samples <- data.frame(lapply(colnames(rawCounts)[2:10], 
+                      function(x){gsub(".*CPO_|_S.*", "", x)}))
+colnames(samples) <- colnames(rawCounts)[2:10]
+rownames(samples) <- c("treatment_time")
+samples <- data.frame(t(samples))  
+samples
+```
+
+
+# Data cleaning
+
+## Check if any gene names are duplicated
+To clean the dataset, we will first determine whether any genes are duplicated.
+
+```{r eval = TRUE, message = FALSE, warning = FALSE}
+length(unique(rawCounts$gene_name))
+```
+There are 29755 unique genes names, so there are no duplicates.
+We will check for duplicates again in the "Identifiter mapping" step.
+
+## Filter out genes with low counts
+To improve the quality of our dataset, we will find and remove weakly expressed
+and non-informative features, which would be irrelevant in downstream analysis.
+
+We will use the edgeR package, which defines a sufficiently low count to be 
+less than 1 read per million in n samples, where n is the size of the smallest
+group of replicates. In this dataset, n = 3 since there are 3 samples per group.
+
+```{r eval = TRUE, message = FALSE, warning = FALSE}
+# Sort genes from highest to lowest counts
+summarized_gene_counts <- rowSums(rawCounts[, 2:10])
+names(summarized_gene_counts) <- rawCounts$gene_name
+summarized_gene_counts <- sort(summarized_gene_counts, decreasing = TRUE)
+
+# Calculate gene counts to counts per million 
+counts_per_mil = edgeR::cpm(rawCounts[, 2:10])
+rownames(counts_per_mil) <- rawCounts[, 1]
+
+# Remove genes with low counts
+keep = rowSums(counts_per_mil > 1) >= 3
+filteredCounts = rawCounts[keep,]
+```
+
+How many genes are included after filtering?
+```{r eval = TRUE, message = FALSE, warning = FALSE}
+dim(filteredCounts)
+```
+12,929 genes. So more than half (16,826) of the genes were filtered out.
+
+
+# Identifier mapping
+Inspecting the filtered data, most gene names are in HUGO symbol format. 
+However, some genes have GenBank accession numbers which include version
+numbers after a period. We can use the amount of such genes to determine 
+whether they need to be excluded from the dataset.
+
+Using the ensembl mart we can still map existing HUGO symbols to HUGO symbols.
+
+```{r eval = TRUE, message = FALSE, warning = FALSE}
+# Connect to ensembl mart
+ensembl <- biomaRt::useMart("ensembl")
+# Get human dataset
+ensembl = biomaRt::useDataset("hsapiens_gene_ensembl", mart = ensembl)
+
+# Map gene names to HUGO gene symbols
+filteredCountsIDConversion <- biomaRt::getBM(attributes = 
+      c("hgnc_symbol"),filters=c("hgnc_symbol"),
+      values=filteredCounts$gene_name, mart=ensembl)
+nrow(filteredCountsIDConversion)
+# How many gene names could not be mapped to a HUGO symbol?
+nrow(filteredCounts) - nrow(filteredCountsIDConversion)
+# Any duplicates of mapped symbols?
+nrow(filteredCountsIDConversion) - 
+  length(unique(filteredCountsIDConversion$hgnc_symbol))
+```
+There were no duplicates in mapped symbols. 
+The proportion of gene names that could not be mapped to HUGO gene symbols is
+`r ((nrow(filteredCounts) - nrow(filteredCountsIDConversion)) / nrow(filteredCounts)) * 100`%. 
+Given that this is quite a significant amount, we can keep the unmapped genes
+in the filtered dataset at this point in the processing. It is possible that 
+some of these unmapped genes may have interesting results in downstream analysis.
+
+
+# Data normalization
+
+## Data distribution before normalization
+We will observe the distribution of the filtered dataset to determine an
+appropriate normalization method.
+
+### Boxplot
+A boxplot will provide an initial view of the data distribution and statistics.
+```{r eval = TRUE, message = FALSE, warning = FALSE}
+# Transform counts per million to log2
+boxData <- log2(edgeR::cpm(filteredCounts[, 2:10]))
+boxplot(boxData, xlab = "Samples", ylab = "log2 CPM",
+        las = 2, cex = 0.5, cex.lab = 0.5,
+        cex.axis = 0.5, main = "CPO RNA-seq samples before normalization")
+
+# Draw the median on each boxplot
+abline(h = median(apply(boxData, 2, median)), 
+       col = "green", lwd = 0.6, lty = "dashed")
+```
+
+The boxplot shows similar distributions across all 9 samples, including the
+median, quantiles, and distribution of outliers. 
+
+
+### Density plot
+Next, we will plot the density distribution of each sample as another way
+to assess the overall distribution of our dataset before normalization.
+```{r eval = TRUE, message = FALSE, warning = FALSE}
+countsDensity <- apply(log2(edgeR::cpm(filteredCounts[, 2:10])), 2, density)
+
+# Calculate the axis limits across all 9 samples
+xlim1 <- 0
+ylim1 <- 0
+for (i in 1:length(countsDensity)) {
+  xlim1 <- range(c(xlim1, countsDensity[[i]]$x))
+  ylim1 <- range(c(ylim1, countsDensity[[i]]$y))
+}
+
+cols1 <- rainbow(length(countsDensity))
+ltys1 <- rep(1, length(countsDensity))
+
+# Plot the first density plot
+plot(countsDensity[[1]], xlim = xlim1, ylim = ylim1, type = "n",
+     ylab = "Smoothing density of log2-CPM", 
+     main = "Density plot before normalization", cex.lab = 0.7)
+# Plot each sample line
+for (i in 1:length(countsDensity)) {
+  lines(countsDensity[[i]], col = cols1[i], lty = ltys1[i])
+}
+legend("topright", colnames(boxData), col = cols1, lty = ltys1, cex = 0.75, 
+       border = "black", text.col = cols1, merge = TRUE, bg = "gray75")
+
+```
+
+The density plot seems to most closely follow both somewhat bimodal distribution.
+There is some variation between the samples, though the overall distributions
+are similar.
+
+## Normalization by distribution
+As recommended in lecture, Trimmed Mean of M-values (TMM) normalization is a
+specialized and commonly used method for RNA-seq data. TMM assumes that most genes are 
+not differentially expressed, and that there are a similar number of up- and
+down- regulated genes in the data across samples.
+
+```{r eval = TRUE, message = FALSE, warning = FALSE}
+# Create DGEList object to be used by edgeR
+filteredDataMatrix <- as.matrix(filteredCounts[, 2:10])
+rownames(filteredDataMatrix) <-filteredCounts$gene_name
+d = edgeR::DGEList(counts = filteredDataMatrix, group = samples$treatment_time)
+
+# Calculate normalization factors
+d = edgeR::calcNormFactors(d)
+# Get normalized data in counts per million
+normalizedCounts <- edgeR::cpm(d)
+```
+
+### Boxplot after normalization
+```{r eval = TRUE, message = FALSE, warning = FALSE}
+# Transform normalized counts per million to log2
+boxDataNorm <- log2(normalizedCounts)
+boxplot(boxDataNorm, xlab = "Samples", ylab = "log2 CPM",
+        las = 2, cex = 0.5, cex.lab = 0.5,
+        cex.axis = 0.5, main = "CPO RNA-seq samples after normalization")
+
+# Draw the median on each boxplot
+abline(h = median(apply(boxDataNorm, 2, median)), 
+       col = "green", lwd = 0.6, lty = "dashed")
+```
+
+Comparing the boxplots before and after normalization, there are slight
+differences. Notably, the medians align visibly more closely after normalizing.
+
+
+### Density plot after normalization
+```{r eval = TRUE, message = FALSE, warning = FALSE}
+countsDensityNorm <- apply(log2(normalizedCounts), 2, density)
+
+# Calculate the axis limits across all 9 samples
+xlim1 <- 0
+ylim1 <- 0
+for (i in 1:length(countsDensityNorm)) {
+  xlim1 <- range(c(xlim1, countsDensityNorm[[i]]$x))
+  ylim1 <- range(c(ylim1, countsDensityNorm[[i]]$y))
+}
+
+cols1 <- rainbow(length(countsDensityNorm))
+ltys1 <- rep(1, length(countsDensityNorm))
+
+# Plot the first density plot
+plot(countsDensityNorm[[1]], xlim = xlim1, ylim = ylim1, type = "n",
+     ylab = "Smoothing density of log2-CPM", 
+     main = "Density plot after normalization", cex.lab = 0.7)
+# Plot each sample line
+for (i in 1:length(countsDensityNorm)) {
+  lines(countsDensityNorm[[i]], col = cols1[i], lty = ltys1[i])
+}
+legend("topright", colnames(boxDataNorm), col = cols1, lty = ltys1, cex = 0.75, 
+       border = "black", text.col = cols1, merge = TRUE, bg = "gray75")
+
+```
+
+Similar to the boxplots, there do not appear to be significant differences
+between the density distrubtions before and after normalization. However, the
+sample plots after normalization show slightly less variance in some regions.
+
+### MDS plot after normalization
+A multidimensional scaling (MDS) plot shows distances between samples.
+
+Using the normalization factors, plot the samples on an MDS plot.
+```{r eval = TRUE, message = FALSE, warning = FALSE}
+limma::plotMDS(d, labels = rownames(samples),
+        col = c("grey", "darkgreen", "blue") [factor(samples$treatment_time)])
+```
+
+After normalization, the three treatment_time groups each form a distinct
+cluster and are quite distant from each other. The SARS-CoV-2_24hpi group (green) 
+is most closely clustered, followed by the Mock_72hpi group (grey), while 
+SARS-CoV-2_72hpi (blue) samples are most distant from each other.
+
+
+## Save the normalized dataset
+Since the normalized dataset is in a DGEList, we can use edgeR to convert it
+to a matrix. Then, we can save the matrix as a csv file for ease of future
+analysis.
+```{r, message = FALSE, warning = FALSE}
+normalizedDataMatrix <- edgeR::as.matrix.DGEList(d)
+# Save to csv file in current directory with rownames as gene names
+write.csv(normalizedDataMatrix, file = "normalized_gene_counts.csv", row.names = TRUE)
+```
+
+
+# Interpretation of normalized data
+
+### What are the control and test conditions of the dataset?
+The control conditions are the growth and infection protocols, which were identical
+apart from the experimental treatment (described below).
+The main test conditions are exposure to SARS-CoV-2 or the vehicle control treatment. 
+For the virus-exposed brain organoids, there were also 2 timepoints of transcriptomic 
+analysis: either 24 or 72 hours post-infection (hpi).
+
+### Why is the dataset of interest to you?
+Research on SARS-CoV-2 is constantly evolving, and the neurological effects of 
+the virus are one of the areas that are not yet well understood, so I am particularly
+curious about it.
+
+### Were there expression values that were not unique for specific genes? How did you handle these?
+Based on the provided gene identifiers in the dataset, there were no duplicates.
+
+### Were there expression values that could not be mapped to current HUGO symbols?
+Yes, 1,584 expression values could not be mapped to current HUGO symbols.
+Given this relatively sizeable number (12% of genes after filtering out low counts),
+these unmapped genes are still kept in the dataset at this point.
+
+### How many outliers were removed?
+16,826 genes with low counts were removed from the dataset using edgeR.
+
+### How did you handle replicates?
+There are 3 replicates for each of the 3 treatment_time groups. In the normalization
+step, we took into account the 3 groups and used TMM, which is a sample-based method.
+
+### What is the final coverage of your dataset?
+The final coverage of my dataset is 12,929 genes and 9 samples.
+
+# References
